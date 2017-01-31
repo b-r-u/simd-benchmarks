@@ -1,3 +1,5 @@
+// Fill a buffer with random float values and measure run time of prefix sum implementations
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -5,14 +7,14 @@
 #include <math.h>
 #include <time.h>
 
-// Fill a buffer with random float values and test two prefix sum implementations.
-
 
 // prefix sum with conversion to uint8_t using SSE3 intrinsics
 //
 // Taken from Raph Levien's font-rs (https://github.com/google/font-rs)
 // https://github.com/google/font-rs/blob/master/src/accumulate.c
-void prefix_sum_sse(const float *in, uint8_t *out, uint32_t n) {
+//
+// n (size of the buffers) needs to be a multiple of 4.
+void prefix_sum_to_u8_sse(const float *in, uint8_t *out, uint32_t n) {
     __m128 offset = _mm_setzero_ps();
     __m128i mask = _mm_set1_epi32(0x0c080400);
     __m128 sign_mask = _mm_set1_ps(-0.f);
@@ -32,7 +34,7 @@ void prefix_sum_sse(const float *in, uint8_t *out, uint32_t n) {
 }
 
 // prefix sum with conversion to uint8_t using plain C
-void prefix_sum_naive(const float *in, uint8_t *out, uint32_t n) {
+void prefix_sum_to_u8_naive(const float *in, uint8_t *out, uint32_t n) {
     float sum = 0.0;
     for (uint32_t i = 0; i < n; i++) {
         sum += in[i];
@@ -44,9 +46,49 @@ void prefix_sum_naive(const float *in, uint8_t *out, uint32_t n) {
     }
 }
 
+
+typedef void (*prefix_sum_func_t)(const float *in, uint8_t *out, uint32_t n);
+
+// run func several times and print average run time
+void benchmark(const float *input_buffer,
+               uint32_t size,
+               prefix_sum_func_t func,
+               const char *name,
+               uint8_t *output_buffer)
+{
+    printf("\n%s\n", name);
+    fflush(stdout);
+
+    clock_t ticks = 0;
+    double seconds = 0.0;
+    int i = 0;
+    for (i = 0; i < 128; i++) {
+        clock_t start = clock();
+        func(input_buffer, output_buffer, size);
+        clock_t end = clock();
+        ticks += end - start;
+        seconds = ticks / (double)CLOCKS_PER_SEC;
+        if (i >= 4 && seconds > 1.0) {
+            break;
+        }
+    }
+
+    printf("ran %d times\n", i);
+    printf("avg time: %f secs\n", seconds / (double)(i + 1));
+
+    // print some values from the output buffer
+    for (int k = 0; k < 5 && k < size; k++) {
+        printf("buffer[%d] = %d\n", k, output_buffer[k]);
+    }
+    printf("buffer[%d] = %d\n", size - 1, output_buffer[size - 1]);
+
+    fflush(stdout);
+}
+
 int main(int argc, char **argv) {
+    // buffer size
     uint32_t size = 1024 * 1024 * 128;
-    
+
     // parse first command line argument as size
     if (argc == 2) {
         char *end = NULL;
@@ -63,15 +105,15 @@ int main(int argc, char **argv) {
     printf("buffer size: %d\n", size);
     fflush(stdout);
 
-    float *arr = (float*)malloc(size * sizeof(float));
+    float *buffer = (float*)malloc(size * sizeof(float));
 
     printf("\nfilling buffer...");
     fflush(stdout);
 
-    // fill arr with random values
+    // fill buffer with random values
     srand(time(0));
     for (int i = 0; i < size; i++) {
-        arr[i] = (rand() % 2000 - 1000) * 0.001;
+        buffer[i] = (rand() % 2000 - 1000) * 0.001;
     }
 
     printf(" Done.\n");
@@ -80,41 +122,20 @@ int main(int argc, char **argv) {
 
     // measure time for prefix_sum_sse
     {
-        uint8_t *arr_u8 = (uint8_t*)malloc(size * sizeof(uint8_t));
-
-        double start = (double)clock() / CLOCKS_PER_SEC;
-        prefix_sum_sse(arr, arr_u8, size);
-        double end = (double)clock() / CLOCKS_PER_SEC;
-
-        printf("\nSSE\n");
-        printf("time: %f secs\n", end - start);
-        printf("first value: %d\n", arr_u8[0]);
-        printf("second value: %d\n", arr_u8[1]);
-        printf("last value: %d\n", arr_u8[size - 1]);
-        fflush(stdout);
-
-        free(arr_u8);
+        uint8_t *output_buffer = (uint8_t*)malloc(size * sizeof(uint8_t));
+        benchmark(buffer, size, prefix_sum_to_u8_sse, "SSE", output_buffer);
+        free(output_buffer);
     }
 
     // measure time for prefix_sum_naive
     {
-        uint8_t *arr_u8 = (uint8_t*)malloc(size * sizeof(uint8_t));
-
-        double start = (double)clock() / CLOCKS_PER_SEC;
-        prefix_sum_naive(arr, arr_u8, size);
-        double end = (double)clock() / CLOCKS_PER_SEC;
-
-        printf("\nNAIVE\n");
-        printf("time: %f secs\n", end - start);
-        printf("first value: %d\n", arr_u8[0]);
-        printf("second value: %d\n", arr_u8[1]);
-        printf("last value: %d\n", arr_u8[size - 1]);
-        fflush(stdout);
-
-        free(arr_u8);
+        uint8_t *output_buffer = (uint8_t*)malloc(size * sizeof(uint8_t));
+        benchmark(buffer, size, prefix_sum_to_u8_naive, "NAIVE", output_buffer);
+        free(output_buffer);
     }
 
-    free(arr);
+
+    free(buffer);
 
     return 0;
 }
