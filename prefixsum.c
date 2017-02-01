@@ -46,14 +46,13 @@ void prefix_sum_to_u8_naive(const float *in, uint8_t *out, uint32_t n) {
     }
 }
 
-// prefix sum with conversion to ARGB pixels using SSE3 intrinsics
+// prefix sum with conversion to ARGB pixels using SSE2 intrinsics
 //
 // Most lines are taken from Raph Levien's font-rs.
-// https://github.com/google/font-rs
 // https://github.com/google/font-rs/blob/master/src/accumulate.c
 //
 // n (size of the buffers) needs to be a multiple of 4.
-void prefix_sum_to_argb_sse(const float *in, uint8_t *out, uint32_t n) {
+void prefix_sum_to_argb_sse_float(const float *in, uint8_t *out, uint32_t n) {
     uint32_t *out_32 = (uint32_t*)out;
 
     __m128 offset = _mm_setzero_ps();
@@ -69,7 +68,7 @@ void prefix_sum_to_argb_sse(const float *in, uint8_t *out, uint32_t n) {
         y = _mm_min_ps(y, _mm_set1_ps(1.0f));
         y = _mm_mul_ps(y, _mm_set1_ps(255.0f));
 
-        // distribute value [0, 255] to RGB bytes with float multiplication.
+        // distribute value [0, 255] to RGB bytes with float intrinsics.
 
         // round
         y = _mm_cvtepi32_ps(_mm_cvtps_epi32(y));
@@ -77,10 +76,44 @@ void prefix_sum_to_argb_sse(const float *in, uint8_t *out, uint32_t n) {
         // 0x010101 == 65793
         y = _mm_mul_ps(y, _mm_set1_ps(65793.0f));
 
-        //__m128i z = _mm_add_epi32(_mm_slli_epi32(_mm_mullo_epi16(_mm_cvtps_epi32(y), colors), 8), alpha);
-
         // add alpha component
         __m128i z = _mm_add_epi32(_mm_cvtps_epi32(y), alpha);
+
+        _mm_storeu_si128((__m128i*)&out_32[i], z);
+        offset = _mm_shuffle_ps(x, x, _MM_SHUFFLE(3, 3, 3, 3));
+    }
+}
+
+// prefix sum with conversion to ARGB pixels using SSE2 intrinsics.
+// Uses integer intrinsics for ARGB conversion.
+//
+// Most lines are taken from Raph Levien's font-rs.
+// https://github.com/google/font-rs/blob/master/src/accumulate.c
+//
+// n (size of the buffers) needs to be a multiple of 4.
+void prefix_sum_to_argb_sse_int(const float *in, uint8_t *out, uint32_t n) {
+    uint32_t *out_32 = (uint32_t*)out;
+
+    __m128 offset = _mm_setzero_ps();
+    __m128 sign_mask = _mm_set1_ps(-0.f);
+
+    __m128i alpha = _mm_set1_epi32(0xff000000);
+    __m128i colors_r = _mm_set1_epi32(0x00000100);
+    __m128i colors_gb = _mm_set1_epi32(0x00000101);
+    for (int i = 0; i < n; i += 4) {
+        __m128 x = _mm_load_ps(&in[i]);
+        x = _mm_add_ps(x, _mm_castsi128_ps(_mm_slli_si128(_mm_castps_si128(x), 4)));
+        x = _mm_add_ps(x, _mm_shuffle_ps(_mm_setzero_ps(), x, 0x40));
+        x = _mm_add_ps(x, offset);
+        __m128 y = _mm_andnot_ps(sign_mask, x);  // fabs(x)
+        y = _mm_min_ps(y, _mm_set1_ps(1.0f));
+        y = _mm_mul_ps(y, _mm_set1_ps(255.0f));
+
+        // distribute value [0, 255] to RGB bytes with integer intrinsics.
+
+        __m128i a = _mm_cvtps_epi32(y);
+        __m128i b = _mm_add_epi32(_mm_slli_epi32(_mm_mullo_epi16(a, colors_r), 8), alpha);
+        __m128i z = _mm_add_epi32(_mm_mullo_epi16(a, colors_gb), b);
 
         _mm_storeu_si128((__m128i*)&out_32[i], z);
         offset = _mm_shuffle_ps(x, x, _MM_SHUFFLE(3, 3, 3, 3));
@@ -121,6 +154,7 @@ void benchmark(const float *input_buffer,
 
     clock_t ticks = 0;
     double seconds = 0.0;
+    double timings[128];
     int i = 0;
     for (i = 0; i < 128; i++) {
         clock_t start = clock();
@@ -128,6 +162,7 @@ void benchmark(const float *input_buffer,
         clock_t end = clock();
         ticks += end - start;
         seconds = ticks / (double)CLOCKS_PER_SEC;
+        timings[i] = (end - start) / (double)CLOCKS_PER_SEC;
         if (i >= 4 && seconds > 1.0) {
             break;
         }
@@ -135,6 +170,11 @@ void benchmark(const float *input_buffer,
 
     printf("ran %d times\n", i);
     printf("avg time: %f secs\n", seconds / (double)(i + 1));
+    printf("[");
+    for (int k = 0; k < i; k++) {
+        printf("%f, ", timings[k]);
+    }
+    printf("%f]\n", timings[i]);
 
     // print some values from the output buffer
     for (int k = 0; k < 16 && k < size; k++) {
@@ -180,31 +220,38 @@ int main(int argc, char **argv) {
     fflush(stdout);
 
 
-    // measure time for prefix_sum_sse
+    // measure time for prefix_sum_to_u8_sse
     {
         uint8_t *output_buffer = (uint8_t*)malloc(size * sizeof(uint8_t));
-        benchmark(buffer, size, prefix_sum_to_u8_sse, "SSE", output_buffer);
+        benchmark(buffer, size, prefix_sum_to_u8_sse, "SSE_U8", output_buffer);
         free(output_buffer);
     }
 
-    // measure time for prefix_sum_naive
+    // measure time for prefix_sum_to_u8_naive
     {
         uint8_t *output_buffer = (uint8_t*)malloc(size * sizeof(uint8_t));
-        benchmark(buffer, size, prefix_sum_to_u8_naive, "NAIVE", output_buffer);
+        benchmark(buffer, size, prefix_sum_to_u8_naive, "NAIVE_U8", output_buffer);
         free(output_buffer);
     }
 
-    // measure time for prefix_sum_argb_naive
+    // measure time for prefix_sum_to_argb_naive
     {
         uint8_t *output_buffer = (uint8_t*)malloc(size * 4 * sizeof(uint8_t));
         benchmark(buffer, size, prefix_sum_to_argb_naive, "NAIVE_ARGB", output_buffer);
         free(output_buffer);
     }
 
-    // measure time for prefix_sum_argb_sse
+    // measure time for prefix_sum_to_argb_sse_float
     {
         uint8_t *output_buffer = (uint8_t*)malloc(size * 4 * sizeof(uint8_t));
-        benchmark(buffer, size, prefix_sum_to_argb_sse, "SSE_ARGB", output_buffer);
+        benchmark(buffer, size, prefix_sum_to_argb_sse_float, "SSE_ARGB_FLOAT", output_buffer);
+        free(output_buffer);
+    }
+
+    // measure time for prefix_sum_to_argb_sse_int
+    {
+        uint8_t *output_buffer = (uint8_t*)malloc(size * 4 * sizeof(uint8_t));
+        benchmark(buffer, size, prefix_sum_to_argb_sse_int, "SSE_ARGB_INT", output_buffer);
         free(output_buffer);
     }
 
