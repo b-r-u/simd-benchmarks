@@ -46,6 +46,66 @@ void prefix_sum_to_u8_naive(const float *in, uint8_t *out, uint32_t n) {
     }
 }
 
+// prefix sum with conversion to ARGB pixels using SSE3 intrinsics
+//
+// Most lines are taken from Raph Levien's font-rs.
+// https://github.com/google/font-rs
+// https://github.com/google/font-rs/blob/master/src/accumulate.c
+//
+// n (size of the buffers) needs to be a multiple of 4.
+void prefix_sum_to_argb_sse(const float *in, uint8_t *out, uint32_t n) {
+    uint32_t *out_32 = (uint32_t*)out;
+
+    __m128 offset = _mm_setzero_ps();
+    __m128 sign_mask = _mm_set1_ps(-0.f);
+
+    __m128i alpha = _mm_set1_epi32(0xff000000);
+    for (int i = 0; i < n; i += 4) {
+        __m128 x = _mm_load_ps(&in[i]);
+        x = _mm_add_ps(x, _mm_castsi128_ps(_mm_slli_si128(_mm_castps_si128(x), 4)));
+        x = _mm_add_ps(x, _mm_shuffle_ps(_mm_setzero_ps(), x, 0x40));
+        x = _mm_add_ps(x, offset);
+        __m128 y = _mm_andnot_ps(sign_mask, x);  // fabs(x)
+        y = _mm_min_ps(y, _mm_set1_ps(1.0f));
+        y = _mm_mul_ps(y, _mm_set1_ps(255.0f));
+
+        // distribute value [0, 255] to RGB bytes with float multiplication.
+
+        // round
+        y = _mm_cvtepi32_ps(_mm_cvtps_epi32(y));
+
+        // 0x010101 == 65793
+        y = _mm_mul_ps(y, _mm_set1_ps(65793.0f));
+
+        //__m128i z = _mm_add_epi32(_mm_slli_epi32(_mm_mullo_epi16(_mm_cvtps_epi32(y), colors), 8), alpha);
+
+        // add alpha component
+        __m128i z = _mm_add_epi32(_mm_cvtps_epi32(y), alpha);
+
+        _mm_storeu_si128((__m128i*)&out_32[i], z);
+        offset = _mm_shuffle_ps(x, x, _MM_SHUFFLE(3, 3, 3, 3));
+    }
+}
+
+// prefix sum with conversion to ARGB pixels using plain C
+void prefix_sum_to_argb_naive(const float *in, uint8_t *out, uint32_t n) {
+    // 1 pixel consists of 4 uint8_t values
+    uint32_t *out_32 = (uint32_t*)out;
+
+    uint32_t colors = (1 << 16) + (1 << 8) + 1;
+    uint32_t alpha = 255 << 24;
+
+    float sum = 0.0;
+    for (uint32_t i = 0; i < n; i++) {
+        sum += in[i];
+        float x = fabsf(sum);
+        x = x < 1.0f ? x * 255.0f : 255.0f;
+
+        // round to nearest (like the SSE version)
+        out_32[i] = (uint32_t)(x + 0.5f) * colors + alpha;
+    }
+}
+
 
 typedef void (*prefix_sum_func_t)(const float *in, uint8_t *out, uint32_t n);
 
@@ -77,7 +137,7 @@ void benchmark(const float *input_buffer,
     printf("avg time: %f secs\n", seconds / (double)(i + 1));
 
     // print some values from the output buffer
-    for (int k = 0; k < 5 && k < size; k++) {
+    for (int k = 0; k < 16 && k < size; k++) {
         printf("buffer[%d] = %d\n", k, output_buffer[k]);
     }
     printf("buffer[%d] = %d\n", size - 1, output_buffer[size - 1]);
@@ -131,6 +191,20 @@ int main(int argc, char **argv) {
     {
         uint8_t *output_buffer = (uint8_t*)malloc(size * sizeof(uint8_t));
         benchmark(buffer, size, prefix_sum_to_u8_naive, "NAIVE", output_buffer);
+        free(output_buffer);
+    }
+
+    // measure time for prefix_sum_argb_naive
+    {
+        uint8_t *output_buffer = (uint8_t*)malloc(size * 4 * sizeof(uint8_t));
+        benchmark(buffer, size, prefix_sum_to_argb_naive, "NAIVE_ARGB", output_buffer);
+        free(output_buffer);
+    }
+
+    // measure time for prefix_sum_argb_sse
+    {
+        uint8_t *output_buffer = (uint8_t*)malloc(size * 4 * sizeof(uint8_t));
+        benchmark(buffer, size, prefix_sum_to_argb_sse, "SSE_ARGB", output_buffer);
         free(output_buffer);
     }
 
