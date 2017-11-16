@@ -1,5 +1,5 @@
 CFLAGS= -std=c99 -pedantic -Wall -march=native -O3
-LIBS= 
+LIBS= -lm
 
 prefixsum: prefixsum.c
 	$(CC) prefixsum.c -o prefixsum $(CFLAGS) $(LIBS)

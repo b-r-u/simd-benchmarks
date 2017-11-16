@@ -1,11 +1,12 @@
 // Fill a buffer with random float values and measure run time of prefix sum implementations
 
-#include <stdint.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <tmmintrin.h>
 #include <math.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
+#include <tmmintrin.h>
 
 
 // prefix sum with conversion to uint8_t using SSE3 intrinsics
@@ -140,9 +141,44 @@ void prefix_sum_to_argb_naive(const float *in, uint8_t *out, uint32_t n) {
 }
 
 
+// Compare the two given buffers with length n.
+bool compare_buffers(uint8_t *buf_a, uint8_t *buf_b, uint32_t n) {
+    for (uint32_t i = 0; i < n; i++) {
+        if (buf_a[i] != buf_b[i]) {
+            printf("Buffers not equal at element[%d]: %d != %d\n", i, buf_a[i], buf_b[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
+// Compare the two given buffers: buf_u8 (with length n) and buf_argb (with
+// length n*4).
+bool compare_u8_to_argb_buffers(uint8_t *buf_u8, uint8_t *buf_argb, uint32_t n) {
+    for (uint32_t i = 0; i < n; i++) {
+        uint8_t val = buf_u8[i];
+        if (val != buf_argb[i * 4] ||
+            val != buf_argb[i * 4 + 1] ||
+            val != buf_argb[i * 4 + 2] ||
+            buf_argb[i * 4 + 3] != 255)
+        {
+            printf("Buffers not equal at element %d: [%d, %d, %d, 255] != [%d, %d, %d, %d]\n",
+                    i, val, val, val,
+                    buf_argb[i * 4],
+                    buf_argb[i * 4 + 1],
+                    buf_argb[i * 4 + 2],
+                    buf_argb[i * 4 + 3]);
+            return false;
+        }
+    }
+    return true;
+}
+
+
 typedef void (*prefix_sum_func_t)(const float *in, uint8_t *out, uint32_t n);
 
-// run func several times and print average run time
+// Runs func several times and measures run time. Prints the average, minimum
+// value and standard deviation of those run times.
 void benchmark(const float *input_buffer,
                uint32_t size,
                prefix_sum_func_t func,
@@ -155,32 +191,44 @@ void benchmark(const float *input_buffer,
     clock_t ticks = 0;
     double seconds = 0.0;
     double timings[128];
+    double min_time = -1.0;
     int i = 0;
     for (i = 0; i < 128; i++) {
         clock_t start = clock();
         func(input_buffer, output_buffer, size);
         clock_t end = clock();
+
         ticks += end - start;
         seconds = ticks / (double)CLOCKS_PER_SEC;
         timings[i] = (end - start) / (double)CLOCKS_PER_SEC;
+
+        if (i == 0) {
+            min_time = timings[i];
+        } else {
+            min_time = fmin(min_time, timings[i]);
+        }
+
         if (i >= 4 && seconds > 1.0) {
             break;
         }
     }
 
     printf("ran %d times\n", i);
-    printf("avg time: %f secs\n", seconds / (double)(i + 1));
-    printf("[");
-    for (int k = 0; k < i; k++) {
-        printf("%f, ", timings[k]);
-    }
-    printf("%f]\n", timings[i]);
 
-    // print some values from the output buffer
-    for (int k = 0; k < 16 && k < size; k++) {
-        printf("buffer[%d] = %d\n", k, output_buffer[k]);
+    double avg_time = seconds / (double)(i + 1);
+    printf("avg time: %f secs\n", avg_time);
+    printf("min time: %f secs\n", min_time);
+
+    // report standard deviation of timings
+    {
+        double diffs = 0.0;
+        for (int k = 0; k <= i; k++) {
+            diffs += pow(timings[k] - avg_time, 2.0);
+        }
+
+        double std_dev = sqrt(diffs / (double)i);
+        printf("std deviation: %f\n", std_dev);
     }
-    printf("buffer[%d] = %d\n", size - 1, output_buffer[size - 1]);
 
     fflush(stdout);
 }
@@ -220,17 +268,15 @@ int main(int argc, char **argv) {
     fflush(stdout);
 
 
+    // measure time for prefix_sum_to_u8_naive
+    uint8_t *comparison_buffer = (uint8_t*)malloc(size * sizeof(uint8_t));
+    benchmark(buffer, size, prefix_sum_to_u8_naive, "NAIVE_U8", comparison_buffer);
+
     // measure time for prefix_sum_to_u8_sse
     {
         uint8_t *output_buffer = (uint8_t*)malloc(size * sizeof(uint8_t));
         benchmark(buffer, size, prefix_sum_to_u8_sse, "SSE_U8", output_buffer);
-        free(output_buffer);
-    }
-
-    // measure time for prefix_sum_to_u8_naive
-    {
-        uint8_t *output_buffer = (uint8_t*)malloc(size * sizeof(uint8_t));
-        benchmark(buffer, size, prefix_sum_to_u8_naive, "NAIVE_U8", output_buffer);
+        compare_buffers(comparison_buffer, output_buffer, size);
         free(output_buffer);
     }
 
@@ -238,6 +284,7 @@ int main(int argc, char **argv) {
     {
         uint8_t *output_buffer = (uint8_t*)malloc(size * 4 * sizeof(uint8_t));
         benchmark(buffer, size, prefix_sum_to_argb_naive, "NAIVE_ARGB", output_buffer);
+        compare_u8_to_argb_buffers(comparison_buffer, output_buffer, size);
         free(output_buffer);
     }
 
@@ -245,6 +292,7 @@ int main(int argc, char **argv) {
     {
         uint8_t *output_buffer = (uint8_t*)malloc(size * 4 * sizeof(uint8_t));
         benchmark(buffer, size, prefix_sum_to_argb_sse_float, "SSE_ARGB_FLOAT", output_buffer);
+        compare_u8_to_argb_buffers(comparison_buffer, output_buffer, size);
         free(output_buffer);
     }
 
@@ -252,10 +300,11 @@ int main(int argc, char **argv) {
     {
         uint8_t *output_buffer = (uint8_t*)malloc(size * 4 * sizeof(uint8_t));
         benchmark(buffer, size, prefix_sum_to_argb_sse_int, "SSE_ARGB_INT", output_buffer);
+        compare_u8_to_argb_buffers(comparison_buffer, output_buffer, size);
         free(output_buffer);
     }
 
-
+    free(comparison_buffer);
     free(buffer);
 
     return 0;
